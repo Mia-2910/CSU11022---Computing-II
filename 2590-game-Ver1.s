@@ -109,10 +109,6 @@ End_Main:
 
 
 
-@ Parameters:
-@    R2: level of the game (level 0 or 1)
-@    R3:  int countPress
-
 
 @
 @ SysTick interrupt handler
@@ -242,7 +238,7 @@ STM32 Cortex-M4 Programming Manual 4.5.2 (pg. 248)
   LDR     R4, =GPIOE_ODR            
   LDR     R5, [R4]                  
   BIC     R5, R5, #(1 << LD8_PIN)   
-  EOR     R5, #(0b1<<(LD9_PIN))     
+  EOR     R5, #(0b1<<(LD9_PIN))  á  
   STR     R5, [R4]
 
   LDR     R4, =countdown 
@@ -256,7 +252,7 @@ STM32 Cortex-M4 Programming Manual 4.5.2 (pg. 248)
   CMP     R5, #0  
   BNE     .Lbranch
   LDR     R5, =BLINK_PERIOD      @
-  STR     R5, [R4] 
+  STR     R5, [R4]               @ havent reset coundown, not really need
  
 .LwaitUserInput:
   //Minh ..... (might using EXTI0_IRQHandle for button click. Or set a flag 
@@ -283,11 +279,17 @@ STM32 Cortex-M4 Programming Manual 4.5.2 (pg. 248)
   LDR     R5, =SCB_ICSR_PENDSTCLR   @
   STR     R5, [R4]                  @
 
-
-
-
   @ Return from interrupt handler
   POP  {R3, R4, R5, R6, PC}
+
+EXTI0_IRQHandler:
+
+@ check unserinput
+@ blinky all red if wrong
+@ blinkey all blue / all led rainbow if right
+
+
+
 
 
   .section .data
@@ -296,5 +298,7 @@ countdown:
   .space  4
 level:
     .word 0        @ current level, initialized to 0 @ deleat this if dont do 2 level
+
+
+
   .end
- MOV 
