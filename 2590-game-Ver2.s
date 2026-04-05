@@ -7,30 +7,34 @@
   .global  Main
   .global  SysTick_Handler
 
-  @ Definitions are in definitions.s to keep blinky.s "clean"
+  @ keep hardware defs here
   #include "definitions.S"
 
-  .equ    BLINK_PERIOD, 10000
-  .equ    HOLD_LIMIT,   2000
-  .equ    GPIOA_IDR,    0x48000010
+  .equ    LED_ON_TICKS,     1800      @ how long one led stays on
+  .equ    LED_GAP_TICKS,    1200      @ gap between leds
+  .equ    HOLD_LIMIT,       2000      @ hold blue button to submit / next round
+  .equ    GPIOA_IDR,        0x48000010
 
   .section .text
   .type Main, %function
-Main:
-  PUSH    {R4-R6,LR}
 
-  @ Enable GPIO port E by enabling its clock
-  @ STM32F303 Reference Manual 9.4.6 (pg. 148)
+@ main setup:
+@ - enable GPIO for LEDs and blue button
+@ - initialise game variables
+@ - start SysTick interrupt
+
+Main:
+  PUSH    {R4-R7,LR}
+
+  @ enable GPIO clocks for memory-mapped I/O
+  @ GPIOE -> LEDs, GPIOA -> blue button
   LDR     R4, =RCC_AHBENR
   LDR     R5, [R4]
   ORR     R5, R5, #(0b1 << RCC_AHBENR_GPIOEEN_BIT)
-
-  @ also enable GPIOA for blue user button
   ORR     R5, R5, #(0b1 << 17)
   STR     R5, [R4]
 
-  @ Configure leds for output
-  @ STM32F303 Reference Manual 11.4.1 (pg. 237)
+  @ configure LED pins as output using GPIO registers
   LDR     R4, =GPIOE_MODER
 
   LDR     R5, [R4]
@@ -76,224 +80,160 @@ Main:
   @ start with leds off
   BL      TurnOffAllLeds
 
-  @ init variables
-  LDR     R4, =countdown
-  LDR     R5, =BLINK_PERIOD
+  @ init seed
+  LDR     R4, =seed
+  LDR     R5, =7
   STR     R5, [R4]
 
+  @ init vars
   MOV     R5, #0
-  LDR     R4, =targetCount
-  STR     R5, [R4]
-  LDR     R4, =pressCount
-  STR     R5, [R4]
-  LDR     R4, =waitingInput
-  STR     R5, [R4]
   LDR     R4, =buttonPrev
   STR     R5, [R4]
   LDR     R4, =holdCount
   STR     R5, [R4]
   LDR     R4, =gameResult
   STR     R5, [R4]
+  LDR     R4, =resultArmed
+  STR     R5, [R4]
+  LDR     R4, =tickCount
+  STR     R5, [R4]
 
-  @ Configure SysTick Timer
-  @ STM32 Cortex-M4 Programming Manual 4.4.3 (pg. 225)
+  @ configure SysTick interrupt
+  @ game logic runs inside SysTick_Handler
   LDR     R4, =SCB_ICSR
   LDR     R5, =SCB_ICSR_PENDSTCLR
   STR     R5, [R4]
 
-  @ STM32 Cortex-M4 Programming Manual 4.5.1 (pg. 247)
-  LDR   R4, =SYSTICK_CSR
-  LDR   R5, =0
-  STR   R5, [R4]
-  
-  @ STM32 Cortex-M4 Programming Manual 4.5.2 (pg. 248)
-  LDR   R4, =SYSTICK_LOAD
-  LDR   R5, =3000          @ bigger = slower
-  STR   R5, [R4]
+  LDR     R4, =SYSTICK_CSR
+  LDR     R5, =0
+  STR     R5, [R4]
 
-  @ STM32 Cortex-M4 Programming Manual 4.5.3 (pg. 249)
-  LDR   R4, =SYSTICK_VAL
-  LDR   R5, =0x1
-  STR   R5, [R4]
+  LDR     R4, =SYSTICK_LOAD
+  LDR     R5, =1400          @ bigger = slower
+  STR     R5, [R4]
 
-  @ STM32 Cortex-M4 Programming Manual 4.4.3 (pg. 225)
-  LDR   R4, =SYSTICK_CSR
-  LDR   R5, =0x7
-  STR   R5, [R4]
+  LDR     R4, =SYSTICK_VAL
+  LDR     R5, =0x1
+  STR     R5, [R4]
 
-  @ Nothing else to do in Main
-  @ Idle loop forever
+  LDR     R4, =SYSTICK_CSR
+  LDR     R5, =0x7
+  STR     R5, [R4]
+
+  @ make first round
+  BL      StartNewRound
+
 Idle_Loop:
-  B     Idle_Loop
+  B       Idle_Loop
   
 End_Main:
-  POP   {R4-R6,PC}
+  POP     {R4-R7,PC}
 
 
 
 
-@
-@ SysTick interrupt handler
-@
+@ main interrupt-driven game loop
+@ handles:
+@ - random pattern display
+@ - user button input
+@ - result checking
+@ - next round logic
+
   .type  SysTick_Handler, %function
 
 SysTick_Handler:
-  PUSH    {R3, R4, R5, R6, LR}
+  PUSH    {R3, R4, R5, R6, R7, LR}
 
-  @ if game already ended, keep result on
+  @ free running counter for better random seed
+  LDR     R4, =tickCount
+  LDR     R5, [R4]
+  ADD     R5, R5, #1
+  STR     R5, [R4]
+
+  @ if already win/lose, wait for next-round input
   LDR   R4, =gameResult
   LDR   R5, [R4]
   CMP   R5, #0
-  BNE   .Lbranch
+  BNE   .LResultState
 
-  @ if waiting for user input, go check blue button
+  @ if waiting for user answer, handle input
   LDR   R4, =waitingInput
   LDR   R5, [R4]
   CMP   R5, #1
   BEQ   .LHandleInput
 
-.LStart:
+  @ otherwise still showing pattern
+  B     .LShowPattern
+
+
+@ show one random LED pattern step at a time
+.LShowPattern:
+  @ countdown for show phase
   LDR   R4, =countdown
   LDR   R5, [R4]
-
-  LDR   R6, =9000
-  CMP   R5, R6
-  BEQ   .LelseFireLD6
- 
-  LDR   R6, =8000
-  CMP   R5, R6
-  BEQ   .LelseFireLD10
-  
-  LDR   R6, =7000
-  CMP   R5, R6
-  BEQ   .LelseFireLD7
-
-  LDR   R6, =6000
-  CMP   R5, R6
-  BEQ   .LelseFireLD5
- 
-  LDR   R6, =5000
-  CMP   R5, R6
-  BEQ   .LelseFireLD8
-
-  LDR   R6, =4000
-  CMP   R5, R6
-  BEQ   .LelseFireLD9
-
-  LDR   R6, =2000
-  CMP   R5, R6
-  BEQ   .LwaitUserInput
-
   SUB   R5, R5, #1
   STR   R5, [R4]
-  B     .Lbranch
+  CMP   R5, #0
+  BGT   .Lbranch
 
-.LelseFireLD6:
+  @ check if led is currently on or off
+  LDR   R4, =showState
+  LDR   R5, [R4]
+  CMP   R5, #0
+  BEQ   .LShowNextStep
+
+  @ led was on, now turn off and move to next step
   BL      TurnOffAllLeds
-  LDR     R4, =GPIOE_ODR
-  LDR     R5, [R4]
-  ORR     R5, #(0b1<<(LD6_PIN))
-  STR     R5, [R4]
 
-  LDR     R4, =targetCount
+  LDR     R4, =stepIndex
   LDR     R5, [R4]
   ADD     R5, R5, #1
   STR     R5, [R4]
 
+  LDR     R4, =showState
+  MOV     R5, #0
+  STR     R5, [R4]
+
   LDR     R4, =countdown
-  LDR     R5, =8999
+  LDR     R5, =LED_GAP_TICKS
   STR     R5, [R4]
   B       .Lbranch
 
-.LelseFireLD10:
+
+@ load next LED code from pattern array and display it
+.LShowNextStep:
+  @ if all steps shown, wait for input
+  LDR     R4, =stepIndex
+  LDR     R5, [R4]
+
+  LDR     R4, =stepCount
+  LDR     R6, [R4]
+
+  CMP     R5, R6
+  BGE     .LwaitUserInput
+
+  @ load pattern[stepIndex]
+  LDR     R4, =pattern
+  LDR     R6, =stepIndex
+  LDR     R7, [R6]
+  LDR     R0, [R4, R7, LSL #2]
+
   BL      TurnOffAllLeds
-  LDR     R4, =GPIOE_ODR
-  LDR     R5, [R4]
-  ORR     R5, #(0b1<<(LD10_PIN))
-  STR     R5, [R4]
+  BL      ShowLedFromCode
 
-  LDR     R4, =targetCount
-  LDR     R5, [R4]
-  ADD     R5, R5, #1
+  LDR     R4, =showState
+  MOV     R5, #1
   STR     R5, [R4]
 
   LDR     R4, =countdown
-  LDR     R5, =7999
+  LDR     R5, =LED_ON_TICKS
   STR     R5, [R4]
   B       .Lbranch
 
-.LelseFireLD7:
-  BL      TurnOffAllLeds
-  LDR     R4, =GPIOE_ODR
-  LDR     R5, [R4]
-  ORR     R5, #(0b1<<(LD7_PIN))
-  STR     R5, [R4]
 
-  LDR     R4, =targetCount
-  LDR     R5, [R4]
-  ADD     R5, R5, #1
-  STR     R5, [R4]
-
-  LDR     R4, =countdown
-  LDR     R5, =6999
-  STR     R5, [R4]
-  B       .Lbranch
-
-.LelseFireLD5:
-  BL      TurnOffAllLeds
-  LDR     R4, =GPIOE_ODR
-  LDR     R5, [R4]
-  ORR     R5, #(0b1<<(LD5_PIN))
-  STR     R5, [R4]
-
-  LDR     R4, =targetCount
-  LDR     R5, [R4]
-  ADD     R5, R5, #1
-  STR     R5, [R4]
-
-  LDR     R4, =countdown
-  LDR     R5, =5999
-  STR     R5, [R4]
-  B       .Lbranch
-
-.LelseFireLD8:
-  BL      TurnOffAllLeds
-  LDR     R4, =GPIOE_ODR
-  LDR     R5, [R4]
-  ORR     R5, #(0b1<<(LD8_PIN))
-  STR     R5, [R4]
-
-  LDR     R4, =targetCount
-  LDR     R5, [R4]
-  ADD     R5, R5, #1
-  STR     R5, [R4]
-
-  LDR     R4, =countdown
-  LDR     R5, =4999
-  STR     R5, [R4]
-  B       .Lbranch
-
-.LelseFireLD9:
-  BL      TurnOffAllLeds
-  LDR     R4, =GPIOE_ODR
-  LDR     R5, [R4]
-  ORR     R5, #(0b1<<(LD9_PIN))
-  STR     R5, [R4]
-
-  LDR     R4, =targetCount
-  LDR     R5, [R4]
-  ADD     R5, R5, #1
-  STR     R5, [R4]
-
-  LDR     R4, =countdown
-  LDR     R5, =3999
-  STR     R5, [R4]
-  B       .Lbranch
- 
 .LwaitUserInput:
-  @ player now presses blue button
-  @ short press = +1
-  @ hold = submit answer
+  @ pattern done, now player can answer
+  @ short press = count, long hold = submit
   LDR     R4, =waitingInput
   MOV     R5, #1
   STR     R5, [R4]
@@ -313,8 +253,10 @@ SysTick_Handler:
   BL      TurnOffAllLeds
   B       .Lbranch
 
+
 .LHandleInput:
-  @ read blue button PA0
+  @ read blue button from GPIO input register
+  @ short press adds 1, long hold submits answer
   LDR     R4, =GPIOA_IDR
   LDR     R5, [R4]
   AND     R5, R5, #1
@@ -345,8 +287,6 @@ SysTick_Handler:
   ADD     R6, R6, #1
   STR     R6, [R4]
 
-  LDR     R4, =holdCount
-  LDR     R6, [R4]
   LDR     R3, =HOLD_LIMIT
   CMP     R6, R3
   BGE     .LJudgeResult
@@ -379,6 +319,8 @@ SysTick_Handler:
   STR     R6, [R4]
   B       .Lbranch
 
+
+@ compare player input with target count
 .LJudgeResult:
   LDR     R4, =waitingInput
   MOV     R5, #0
@@ -394,10 +336,24 @@ SysTick_Handler:
   BEQ     .LPlayerWin
   B       .LPlayerLose
 
+
 .LPlayerWin:
-  @ right answer
+  @ correct result -> show green/blue LEDs
   LDR     R4, =gameResult
   MOV     R5, #1
+  STR     R5, [R4]
+
+  @ force release before next round
+  LDR     R4, =holdCount
+  MOV     R5, #0
+  STR     R5, [R4]
+
+  LDR     R4, =buttonPrev
+  MOV     R5, #0
+  STR     R5, [R4]
+
+  LDR     R4, =resultArmed
+  MOV     R5, #0
   STR     R5, [R4]
 
   BL      TurnOffAllLeds
@@ -410,10 +366,24 @@ SysTick_Handler:
   STR     R5, [R4]
   B       .Lbranch
 
+
 .LPlayerLose:
-  @ wrong answer
+  @ wrong result -> show red/orange LEDs
   LDR     R4, =gameResult
   MOV     R5, #2
+  STR     R5, [R4]
+
+  @ force release before next round
+  LDR     R4, =holdCount
+  MOV     R5, #0
+  STR     R5, [R4]
+
+  LDR     R4, =buttonPrev
+  MOV     R5, #0
+  STR     R5, [R4]
+
+  LDR     R4, =resultArmed
+  MOV     R5, #0
   STR     R5, [R4]
 
   BL      TurnOffAllLeds
@@ -424,15 +394,203 @@ SysTick_Handler:
   ORR     R5, R5, #(1 << LD8_PIN)
   ORR     R5, R5, #(1 << LD10_PIN)
   STR     R5, [R4]
+  B       .Lbranch
+
+@ result screen
+@ player must release button first, then hold again for next round
+.LResultState:
+  LDR     R4, =GPIOA_IDR
+  LDR     R5, [R4]
+  AND     R5, R5, #1
+
+  CMP     R5, #0
+  BEQ     .LResultReleased
+
+  @ if not armed yet, ignore while still holding
+  LDR     R4, =resultArmed
+  LDR     R6, [R4]
+  CMP     R6, #1
+  BNE     .Lbranch
+
+  @ now count hold for next round
+  LDR     R4, =holdCount
+  LDR     R6, [R4]
+  ADD     R6, R6, #1
+  STR     R6, [R4]
+
+  LDR     R3, =HOLD_LIMIT
+  CMP     R6, R3
+  BGE     .LNextRound
+  B       .Lbranch
+
+.LResultReleased:
+  @ after result, player must release first
+  LDR     R4, =holdCount
+  MOV     R6, #0
+  STR     R6, [R4]
+
+  LDR     R4, =resultArmed
+  MOV     R6, #1
+  STR     R6, [R4]
+
+  B       .Lbranch
+
+.LNextRound:
+  @ mix current timing into seed so next round changes
+  LDR     R4, =seed
+  LDR     R5, [R4]
+
+  LDR     R6, =tickCount
+  LDR     R6, [R6]
+  ADD     R5, R5, R6
+
+  LDR     R6, =pressCount
+  LDR     R6, [R6]
+  ADD     R5, R5, R6
+
+  STR     R5, [R4]
+
+  BL      StartNewRound
+  B       .Lbranch
+
 
 .Lbranch:
-  @ Clear interrupt
+  @ clear SysTick interrupt
   LDR     R4, =SCB_ICSR
   LDR     R5, =SCB_ICSR_PENDSTCLR
   STR     R5, [R4]
 
-  @ Return from interrupt handler
-  POP  {R3, R4, R5, R6, PC}
+  POP  {R3, R4, R5, R6, R7, PC}
+
+
+
+@ start a new round:
+@ clear old state, generate new pattern, reset counters
+StartNewRound:
+  PUSH    {R4-R7, LR}
+
+  BL      TurnOffAllLeds
+
+  @ clear state
+  MOV     R5, #0
+  LDR     R4, =pressCount
+  STR     R5, [R4]
+  LDR     R4, =waitingInput
+  STR     R5, [R4]
+  LDR     R4, =buttonPrev
+  STR     R5, [R4]
+  LDR     R4, =holdCount
+  STR     R5, [R4]
+  LDR     R4, =gameResult
+  STR     R5, [R4]
+  LDR     R4, =showState
+  STR     R5, [R4]
+  LDR     R4, =stepIndex
+  STR     R5, [R4]
+  LDR     R4, =resultArmed
+  STR     R5, [R4]
+
+  @ make random pattern
+  BL      GeneratePattern
+
+  @ targetCount = stepCount
+  LDR     R4, =stepCount
+  LDR     R5, [R4]
+  LDR     R4, =targetCount
+  STR     R5, [R4]
+
+  @ start first gap before first led
+  LDR     R4, =countdown
+  LDR     R5, =LED_GAP_TICKS
+  STR     R5, [R4]
+
+  POP     {R4-R7, PC}
+
+
+@ generate:
+@ - number of steps from 5 to 10
+@ - each led code from 0 to 3
+GeneratePattern:
+  PUSH    {R4-R7, LR}
+
+  @ seed = seed*5 + 3
+  LDR     R4, =seed
+  LDR     R5, [R4]
+  ADD     R5, R5, R5, LSL #2
+  ADD     R5, R5, #3
+  STR     R5, [R4]
+
+  @ stepCount = 5..10
+  AND     R6, R5, #0x7
+  CMP     R6, #5
+  BLE     .LstepOk
+  SUB     R6, R6, #2
+.LstepOk:
+  ADD     R6, R6, #5
+  LDR     R4, =stepCount
+  STR     R6, [R4]
+
+  @ fill pattern array
+  MOV     R7, #0
+.LpatternLoop:
+  CMP     R7, R6
+  BGE     .LpatternDone
+
+  @ seed = seed*5 + 1
+  LDR     R4, =seed
+  LDR     R5, [R4]
+  ADD     R5, R5, R5, LSL #2
+  ADD     R5, R5, #1
+  STR     R5, [R4]
+
+  @ led code = 0..3
+  AND     R5, R5, #0x3
+
+  LDR     R4, =pattern
+  STR     R5, [R4, R7, LSL #2]
+
+  ADD     R7, R7, #1
+  B       .LpatternLoop
+
+.LpatternDone:
+  POP     {R4-R7, PC}
+
+
+@ R0 = led code
+@ 0 -> LD5
+@ 1 -> LD6
+@ 2 -> LD7
+@ 3 -> LD8
+ShowLedFromCode:
+  PUSH    {R4, R5, LR}
+
+  LDR     R4, =GPIOE_ODR
+  LDR     R5, [R4]
+
+  CMP     R0, #0
+  BNE     .Lcheck1
+  ORR     R5, R5, #(1 << LD5_PIN)
+  B       .LshowDone
+
+.Lcheck1:
+  CMP     R0, #1
+  BNE     .Lcheck2
+  ORR     R5, R5, #(1 << LD6_PIN)
+  B       .LshowDone
+
+.Lcheck2:
+  CMP     R0, #2
+  BNE     .Lcheck3
+  ORR     R5, R5, #(1 << LD7_PIN)
+  B       .LshowDone
+
+.Lcheck3:
+  ORR     R5, R5, #(1 << LD8_PIN)
+
+.LshowDone:
+  STR     R5, [R4]
+  POP     {R4, R5, PC}
+
 
 TurnOffAllLeds:
   PUSH    {R4,R5,LR}
@@ -449,27 +607,49 @@ TurnOffAllLeds:
   STR     R5, [R4]
   POP     {R4,R5,PC}
 
+
   .section .data
 
 countdown:
-  .word 0        @ round timer
+  .word 0        @ timer for show phase
 
 targetCount:
-  .word 0        @ how many leds were shown
+  .word 0        @ how many leds player should count
 
 pressCount:
   .word 0        @ how many times player pressed
 
 waitingInput:
-  .word 0        @ 0 = showing leds, 1 = checking player input
+  .word 0        @ 0 = showing leds, 1 = player input
 
 buttonPrev:
-  .word 0        @ previous state of blue button
+  .word 0        @ old blue button state
 
 holdCount:
-  .word 0        @ count how long button is held
+  .word 0        @ how long blue button is held
 
 gameResult:
   .word 0        @ 0 = playing, 1 = win, 2 = lose
+
+seed:
+  .word 0        @ small random seed
+
+tickCount:
+  .word 0        @ keeps increasing, used to mix random seed
+
+stepCount:
+  .word 0        @ how many leds this round (5 to 10)
+
+stepIndex:
+  .word 0        @ current step while showing pattern
+
+showState:
+  .word 0        @ 0 = gap, 1 = led currently on
+
+resultArmed:
+  .word 0        @ must release after result before next round
+
+pattern:
+  .space 40      @ 10 words max
 
   .end
