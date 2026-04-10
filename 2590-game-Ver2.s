@@ -132,12 +132,11 @@ End_Main:
 
 
 
-@ main interrupt-driven game loop
-@ handles:
-@ - random pattern display
-@ - user button input
-@ - result checking
-@ - next round logic
+@ game loop (runs in SysTick)
+@ - show LED pattern
+@ - read button input
+@ - check result
+@ - start next round
 
   .type  SysTick_Handler, %function
 
@@ -166,7 +165,7 @@ SysTick_Handler:
   B     .LShowPattern
 
 
-@ show one random LED pattern step at a time
+@ show pattern step by step
 .LShowPattern:
   @ countdown for show phase
   LDR   R4, =countdown
@@ -200,7 +199,7 @@ SysTick_Handler:
   B       .Lbranch
 
 
-@ load next LED code from pattern array and display it
+@ show next LED in pattern
 .LShowNextStep:
   @ if all steps shown, wait for input
   LDR     R4, =stepIndex
@@ -232,8 +231,8 @@ SysTick_Handler:
 
 
 .LwaitUserInput:
-  @ pattern done, now player can answer
-  @ short press = count, long hold = submit
+  @ wait for player input
+  @ short press = +1, long hold = submit
   LDR     R4, =waitingInput
   MOV     R5, #1
   STR     R5, [R4]
@@ -255,8 +254,8 @@ SysTick_Handler:
 
 
 .LHandleInput:
-  @ read blue button from GPIO input register
-  @ short press adds 1, long hold submits answer
+  @ read button
+  @ detect press or hold
   LDR     R4, =GPIOA_IDR
   LDR     R5, [R4]
   AND     R5, R5, #1
@@ -320,7 +319,7 @@ SysTick_Handler:
   B       .Lbranch
 
 
-@ compare player input with target count
+@ check result
 .LJudgeResult:
   LDR     R4, =waitingInput
   MOV     R5, #0
@@ -338,7 +337,7 @@ SysTick_Handler:
 
 
 .LPlayerWin:
-  @ correct result -> show green/blue LEDs
+  @ correct answer
   LDR     R4, =gameResult
   MOV     R5, #1
   STR     R5, [R4]
@@ -368,7 +367,7 @@ SysTick_Handler:
 
 
 .LPlayerLose:
-  @ wrong result -> show red/orange LEDs
+  @ wrong answer
   LDR     R4, =gameResult
   MOV     R5, #2
   STR     R5, [R4]
@@ -396,8 +395,7 @@ SysTick_Handler:
   STR     R5, [R4]
   B       .Lbranch
 
-@ result screen
-@ player must release button first, then hold again for next round
+@ wait for next round input
 .LResultState:
   LDR     R4, =GPIOA_IDR
   LDR     R5, [R4]
@@ -436,7 +434,7 @@ SysTick_Handler:
   B       .Lbranch
 
 .LNextRound:
-  @ mix current timing into seed so next round changes
+  @ start next round
   LDR     R4, =seed
   LDR     R5, [R4]
 
@@ -464,8 +462,8 @@ SysTick_Handler:
 
 
 
-@ start a new round:
-@ clear old state, generate new pattern, reset counters
+@ new round
+@ reset and generate pattern
 StartNewRound:
   PUSH    {R4-R7, LR}
 
@@ -507,10 +505,7 @@ StartNewRound:
   POP     {R4-R7, PC}
 
 
-@ generate:
-@ - number of steps from 5 to 10
-@ - each led code from 0 to 3
-GeneratePattern:
+@ generate random pattern
   PUSH    {R4-R7, LR}
 
   @ seed = seed*5 + 3
