@@ -506,6 +506,7 @@ StartNewRound:
 
 
 @ generate random pattern
+GeneratePattern:
   PUSH    {R4-R7, LR}
 
   @ seed = seed*5 + 3
